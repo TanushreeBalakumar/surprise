@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FingerPaint Magic</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #07030f; overflow: hidden; font-family: "Segoe UI", sans-serif; color: white; }
+  #video { display: none; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; }
+  #bg { opacity: 0.35; }              /* mirrored camera picture, dimmed */
+  #hud { position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+         text-align: center; z-index: 5; pointer-events: none; }
+  #status { font-size: 20px; text-shadow: 0 0 10px #a855f7; }
+  #hint { font-size: 14px; opacity: .7; margin-top: 4px; }
+  #startScreen { position: fixed; inset: 0; background: #07030fee; z-index: 10;
+                 display: flex; flex-direction: column; align-items: center;
+                 justify-content: center; gap: 18px; text-align: center; padding: 20px; }
+  #startScreen h1 { font-size: 44px; text-shadow: 0 0 20px #a855f7; }
+  button { padding: 14px 32px; font-size: 18px; border: none; border-radius: 30px;
+           background: linear-gradient(135deg,#a855f7,#ec4899); color: white; cursor: pointer; }
+  button:hover { transform: scale(1.05); }
+  #card { position: fixed; inset: 0; z-index: 8; display: none; align-items: center;
+          justify-content: center; }
+  #cardInner { background: #1a0b2eee; border: 2px solid #ec4899; border-radius: 24px;
+               padding: 28px; width: min(640px, 92vw); max-height: 88vh; overflow-y: auto;
+               text-align: center; box-shadow: 0 0 40px #a855f7; animation: pop .8s ease; }
+  #cardInner h2 { font-size: 32px; margin-bottom: 16px; color: #f9a8d4; }
+  #cardImgs { display: flex; gap: 12px; justify-content: center; margin-bottom: 18px; }
+  #cardImgs img { width: 48%; max-height: 240px; object-fit: cover; border-radius: 16px;
+                  border: 2px solid #ec4899; }
+  #cardMsg p { font-size: 16px; line-height: 1.6; margin-bottom: 14px; text-align: left; }
+  #cardInner button { margin-top: 8px; }
+  @keyframes pop { from { transform: scale(0); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+</style>
+</head>
+<body>
+
+<video id="video" playsinline></video>
+<canvas id="bg"></canvas>       <!-- layer 1: camera -->
+<canvas id="strokes"></canvas>  <!-- layer 2: your glowing writing -->
+<canvas id="fx"></canvas>       <!-- layer 3: particles + cursor -->
+
+<div id="hud">
+  <div id="status">Loading magic...</div>
+  <div id="hint">Point your index finger to write • Pinch to reveal • Press C to clear</div>
+</div>
+
+<div id="startScreen">
+  <h1>✨ Surpriseeeee ✨</h1>
+  <p>Write your name in the air with your finger,<br>then pinch to reveal a surprise!</p>
+  <button id="startBtn">Start the Magic</button>
+</div>
+
+<div id="card"><div id="cardInner">
+  <h2 id="cardTitle"></h2>
+  <div id="cardImgs"></div>
+  <div id="cardMsg"></div>
+  <button id="again">Do it again ✨</button>
+</div></div>
+
+<script type="module">
+import { HandLandmarker, FilesetResolver } from
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+/* ========= 1. CHANGE THESE FOR YOUR FRIEND ========= */
+const CONFIG = {
+  title: "Hoiiii TLLLLL!💖",    
+  message: [
+    `You know what's funny? If someone asks me about you, I wouldn't call you an unexpected friend, because honestly, you weren't. You were that one person I had already thought, "I really, really want to become friends with him." And don't ask me why, because even I don't have an answer. 😭 There was just something about you that made me feel like, yeah, I definitely want this friend in my life.`,
+    `And honestly, I'm so, so glad I had that thought, because look at us now. You're someone in my closest circle, someone I can talk to about literally anything and everything without filtering my thoughts or wondering if I'm being too much. I can blabber about the most random things, talk about anyone, share the most unimportant details of my day, or just say whatever comes to my mind, and I never feel like I have to think twice before talking to you.`,
+    `And one thing I'm really happy about is how you try to distract me whenever I'm feeling low or irritated about something. You don't even have to do that, but you still try in your own little ways to make things feel lighter for me. Maybe you don't realise how much those little things mean, but it means alot!`,
+    `I think, ever since I was a kid, I've always had this little wish of having a friendship like this. Someone I could be completely myself with, someone I could be stupid with, laugh about the most random things with, and talk to without feeling like I need to explain every little part of myself. And now that I have you, sometimes it genuinely feels like, wait, is this the kind of friendship I always wished for? 😭`,
+    `It's funny how I once just thought, "I want to be friends with him," without knowing where that thought would take me, and now you're actually one of my closest people. If I could go back to that moment, I'd probably tell my past self, "GOOD DECISION, GIRL. YOU HAVE NO IDEA." 😭🫶🏻`,
+    `I'm really, really glad I got to know you, and I'm even happier that we became the kind of friends we are today. Please stay the same silly, crazy person you are, okay? And thank you for being someone I can be so comfortably, unapologetically myself with. I'm genuinely so lucky to have you as my friend. 💗`
+  ],
+  images: ["assets/photo1.jpeg", "assets/photo2.jpeg"],
+  colors: ["#a855f7", "#ec4899", "#38bdf8", "#facc15"]
+};
+/* =================================================== */
+
+const video = document.getElementById("video");
+const bg = document.getElementById("bg"), bgc = bg.getContext("2d");
+const strokes = document.getElementById("strokes"), sc = strokes.getContext("2d", { willReadFrequently: true });
+const fx = document.getElementById("fx"), fc = fx.getContext("2d");
+const statusEl = document.getElementById("status");
+
+let W, H;
+function resize() {
+  W = bg.width = strokes.width = fx.width = innerWidth;
+  H = bg.height = strokes.height = fx.height = innerHeight;
+}
+resize(); addEventListener("resize", resize);
+
+let handLandmarker, running = false;
+let lastPoint = null, smooth = null;
+let hasInk = false, revealed = false;
+let pinchFrames = 0, lostFrames = 0;
+let particles = [];
+let hue = 0;
+
+/* ---------- 2. Load hand tracker ---------- */
+async function loadModel() {
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath:
+        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    numHands: 1
+  });
+}
+
+/* ---------- 3. Start camera ---------- */
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: 1280, height: 720, facingMode: "user" }
+  });
+  video.srcObject = stream;
+  await video.play();
+}
+
+document.getElementById("startBtn").onclick = async () => {
+  document.getElementById("startBtn").textContent = "Loading...";
+  try {
+    await loadModel();
+    await startCamera();
+    document.getElementById("startScreen").style.display = "none";
+    statusEl.textContent = "✍️ Write a name in the air!";
+    running = true;
+    loop();
+  } catch (e) {
+    alert("Could not start: " + e.message + "\nCheck camera permission and internet.");
+    document.getElementById("startBtn").textContent = "Try again";
+  }
+};
+
+/* ---------- 4. Main loop (runs ~60 times a second) ---------- */
+let lastVideoTime = -1;
+function loop() {
+  if (!running) return;
+
+  // draw mirrored camera picture
+  bgc.save(); bgc.scale(-1, 1);
+  bgc.drawImage(video, -W, 0, W, H);
+  bgc.restore();
+
+  fc.clearRect(0, 0, W, H);
+
+  if (!revealed && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const result = handLandmarker.detectForVideo(video, performance.now());
+    handleHand(result);
+  }
+  drawParticles();
+  requestAnimationFrame(loop);
+}
+
+/* ---------- 5. Understand the hand ---------- */
+function handleHand(result) {
+  if (!result.landmarks || result.landmarks.length === 0) {
+    lostFrames++;
+    if (lostFrames > 3) { lastPoint = null; smooth = null; }   // lift the "pen"
+    pinchFrames = 0;
+    return;
+  }
+  lostFrames = 0;
+  const hand = result.landmarks[0];
+  const tip = hand[8];     // index fingertip
+  const thumb = hand[4];   // thumb tip
+
+  // convert 0..1 camera coordinates to screen pixels (x is mirrored)
+  const x = (1 - tip.x) * W, y = tip.y * H;
+
+  // smoothing so lines aren't shaky
+  smooth = smooth ? { x: smooth.x + (x - smooth.x) * 0.4, y: smooth.y + (y - smooth.y) * 0.4 } : { x, y };
+
+  // pinch = thumb and index close together
+  const dist = Math.hypot(tip.x - thumb.x, tip.y - thumb.y);
+  const pinching = dist < 0.05;
+
+  // glowing cursor
+  fc.beginPath();
+  fc.arc(smooth.x, smooth.y, pinching ? 8 : 14, 0, Math.PI * 2);
+  fc.fillStyle = pinching ? "#facc15" : "#ffffff";
+  fc.shadowBlur = 25; fc.shadowColor = "#ec4899"; fc.fill(); fc.shadowBlur = 0;
+
+  if (pinching) {
+    pinchFrames++;
+    lastPoint = null;                       // don't draw while pinching
+    if (pinchFrames > 8 && hasInk) reveal(); // hold pinch ~8 frames
+    return;
+  }
+  pinchFrames = 0;
+
+  // draw glowing line
+  if (lastPoint) {
+    hue = (hue + 2) % 360;
+    sc.strokeStyle = `hsl(${hue + 260}, 100%, 70%)`;
+    sc.lineWidth = 8; sc.lineCap = "round"; sc.lineJoin = "round";
+    sc.shadowBlur = 20; sc.shadowColor = sc.strokeStyle;
+    sc.beginPath(); sc.moveTo(lastPoint.x, lastPoint.y);
+    sc.lineTo(smooth.x, smooth.y); sc.stroke();
+    hasInk = true;
+  }
+  lastPoint = { x: smooth.x, y: smooth.y };
+}
+
+/* ---------- 6. The reveal explosion ---------- */
+function reveal() {
+  revealed = true;
+  statusEl.textContent = "✨ ABRACADABRA! ✨";
+  const img = sc.getImageData(0, 0, W, H).data;
+  particles = [];
+  for (let y = 0; y < H; y += 5) {
+    for (let x = 0; x < W; x += 5) {
+      const a = img[(y * W + x) * 4 + 3];
+      if (a > 120) {
+        const ang = Math.random() * Math.PI * 2;
+        const sp = 1 + Math.random() * 7;
+        particles.push({
+          x, y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp - 1,
+          life: 1, size: 2 + Math.random() * 3,
+          color: CONFIG.colors[Math.floor(Math.random() * CONFIG.colors.length)]
+        });
+      }
+    }
+  }
+  sc.clearRect(0, 0, W, H);
+  setTimeout(showCard, 1800);
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.05; p.vx *= 0.985; p.life -= 0.006;
+    if (p.life <= 0) continue;
+    fc.globalAlpha = Math.max(p.life, 0);
+    fc.fillStyle = p.color; fc.shadowBlur = 12; fc.shadowColor = p.color;
+    fc.beginPath(); fc.arc(p.x, p.y, p.size, 0, Math.PI * 2); fc.fill();
+  }
+  fc.globalAlpha = 1; fc.shadowBlur = 0;
+}
+
+/* ---------- 7. Surprise card ---------- */
+function showCard() {
+  document.getElementById("cardTitle").textContent = CONFIG.title;
+
+  const msg = document.getElementById("cardMsg");
+  msg.innerHTML = "";
+  CONFIG.message.forEach(text => {
+    const p = document.createElement("p");
+    p.textContent = text;
+    msg.appendChild(p);
+  });
+
+  const box = document.getElementById("cardImgs");
+  box.innerHTML = "";
+  CONFIG.images.forEach(src => {
+    const im = document.createElement("img");
+    im.src = src;
+    box.appendChild(im);
+  });
+
+  document.getElementById("card").style.display = "flex";
+  document.getElementById("cardInner").scrollTop = 0;
+}
+
+/* ---------- 8. Reset ---------- */
+function reset() {
+  sc.clearRect(0, 0, W, H);
+  particles = []; hasInk = false; revealed = false;
+  lastPoint = null; smooth = null; pinchFrames = 0;
+  document.getElementById("card").style.display = "none";
+  statusEl.textContent = "✍️ Write a name in the air!";
+}
+document.getElementById("again").onclick = reset;
+addEventListener("keydown", e => { if (e.key.toLowerCase() === "c") { sc.clearRect(0, 0, W, H); hasInk = false; } });
+</script>
+</body>
+</html>
